@@ -52,6 +52,9 @@ type Batcher struct {
 
 	mu      sync.Mutex // guards pending during drain
 	pending []*request
+	// pendingRows is the total row count across pending requests; it is
+	// what MaxBatchSize caps.
+	pendingRows int
 }
 
 // New starts the batcher's background loop.
@@ -127,10 +130,10 @@ func (b *Batcher) loop() {
 		}
 
 		// Collecting: gather until the latency budget expires or the
-		// batch is full.
+		// row budget is full.
 		timer := time.NewTimer(b.maxLatency)
 	collect:
-		for len(b.pending) < b.maxBatchSize {
+		for b.countRows() < b.maxBatchSize {
 			select {
 			case <-b.stopCh:
 				if !timer.Stop() {
@@ -164,6 +167,7 @@ func (b *Batcher) enqueue(req *request) {
 	}
 	b.mu.Lock()
 	b.pending = append(b.pending, req)
+	b.pendingRows += len(req.inputs)
 	n := len(b.pending)
 	b.mu.Unlock()
 	if b.onQueueDepth != nil {
@@ -171,11 +175,19 @@ func (b *Batcher) enqueue(req *request) {
 	}
 }
 
+// countRows returns the total rows currently pending.
+func (b *Batcher) countRows() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pendingRows
+}
+
 // dispatch runs one batched Predict and fans results back to waiters.
 func (b *Batcher) dispatch() {
 	b.mu.Lock()
 	pending := b.pending
 	b.pending = nil
+	b.pendingRows = 0
 	b.mu.Unlock()
 	if b.onQueueDepth != nil {
 		b.onQueueDepth(0)
@@ -243,6 +255,7 @@ func (b *Batcher) failAll(err error) {
 	b.mu.Lock()
 	pending := b.pending
 	b.pending = nil
+	b.pendingRows = 0
 	b.mu.Unlock()
 	for _, req := range pending {
 		if !req.done.Load() {
