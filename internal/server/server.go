@@ -186,6 +186,14 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+// Flush forwards http.Flusher so handlers (e.g. SSE) keep working behind
+// this middleware's wrapper.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // --- handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -245,6 +253,13 @@ func (s *Server) handlePredict(w http.ResponseWriter, r *http.Request) {
 	if len(req.Inputs) > s.cfg.MaxPerRequest {
 		writeError(w, http.StatusBadRequest,
 			"inputs exceeds per-request limit")
+		return
+	}
+	// Fail fast on shape errors as 400s; anything the model raises later is
+	// a genuine inference failure (500).
+	if err := models.CheckInputs(mdl.Name(), mdl.InputDim(), req.Inputs); err != nil {
+		s.inferErrors.Inc(metrics.Labels{"model": id, "reason": "bad_shape"}, 1)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
