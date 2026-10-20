@@ -5,6 +5,9 @@
 //	GET  /v1/models                list registered models
 //	POST /v1/models/{id}/predict   batched inference (JSON)
 //	GET  /v1/models/{id}/stream     token streaming over SSE (see stream.go)
+//	POST /v1/admin/models           register a model at runtime (see admin.go)
+//	PUT  /v1/admin/models/{id}      hot-swap the implementation behind id
+//	DELETE /v1/admin/models/{id}    unregister id
 //	GET  /metrics                  Prometheus exposition
 package server
 
@@ -36,6 +39,9 @@ type Config struct {
 	MaxInflight int
 	// RequestTimeout bounds each predict/stream request.
 	RequestTimeout time.Duration
+	// AdminToken, when non-empty, requires `Authorization: Bearer <token>`
+	// on /v1/admin/* routes. Leave empty only for local development.
+	AdminToken string
 }
 
 // DefaultConfig returns sane defaults for local development.
@@ -70,6 +76,7 @@ type Server struct {
 	batchSize     *metrics.Histogram
 	queueDepth    *metrics.Gauge
 	inflight      *metrics.Gauge
+	adminOps      *metrics.Counter
 }
 
 // New builds a Server. Call Shutdown when done to stop batcher goroutines.
@@ -88,6 +95,7 @@ func New(reg *registry.Registry, m *metrics.Registry, cfg Config) *Server {
 	s.batchSize = m.NewHistogram("inference_batch_size_rows", "Rows per Predict call by model", []float64{1, 2, 4, 8, 16, 32, 64, 128, 256})
 	s.queueDepth = m.NewGauge("inference_queue_depth", "Pending requests per model batcher")
 	s.inflight = m.NewGauge("inference_inflight", "Requests currently executing")
+	s.adminOps = m.NewCounter("admin_operations_total", "Admin API operations by op and result")
 	return s
 }
 
@@ -122,6 +130,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.handleListModels)
 	mux.HandleFunc("POST /v1/models/{id}/predict", s.handlePredict)
 	mux.HandleFunc("GET /v1/models/{id}/stream", s.handleStream)
+	mux.HandleFunc("POST /v1/admin/models", s.adminGuard(s.handleAdminRegister))
+	mux.HandleFunc("PUT /v1/admin/models/{id}", s.adminGuard(s.handleAdminHotswap))
+	mux.HandleFunc("DELETE /v1/admin/models/{id}", s.adminGuard(s.handleAdminDelete))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return s.withMiddleware(mux)
 }
