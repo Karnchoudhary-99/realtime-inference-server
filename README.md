@@ -43,11 +43,43 @@ harness used for the numbers below.
 | `POST` | `/v1/models/{id}/predict` | `{"inputs": [[...], ...]}` → `{"model","version","outputs","latency_ms","request_id"}` |
 | `GET` | `/v1/models/{id}/stream?prompt=...` | SSE: one `data:` frame per token, `[DONE]` terminator |
 | `GET` | `/metrics` | Prometheus text exposition |
+| `POST` | `/v1/admin/models` | register a model from a `ModelSpec` → `201` (conflict `409`, bad spec `400`) |
+| `PUT` | `/v1/admin/models/{id}` | hot-swap the implementation behind `id` (in-flight requests keep going) |
+| `DELETE` | `/v1/admin/models/{id}` | unregister `id` → `204` (unknown `404`) |
 
 Errors are JSON: `{"error": {"code": 404, "message": "unknown model x"}}`.
 Status codes: `400` bad JSON / shape / non-streaming model, `404` unknown
-model, `429` saturated, `500` inference failure, `503` not ready, `504`
-request timeout.
+model, `409` duplicate model id, `429` saturated, `500` inference failure,
+`503` not ready, `504` request timeout.
+
+## Admin API (runtime model registration)
+
+The admin API lets operators add, hot-swap and remove models **without
+redeploying**. Only the built-in zoo types can be instantiated (deliberate
+security boundary — arbitrary code can't be loaded at runtime):
+
+```bash
+# register a custom MLP (try examples/admin.sh for the full tour)
+curl -X POST localhost:8080/v1/admin/models \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"id":"custom-mlp","type":"mlp","version":"v2","input_dim":3,"output_dim":2,"hidden":8,"seed":123}'
+
+# hot-swap it to a bigger net — same id, new version, zero downtime
+curl -X PUT localhost:8080/v1/admin/models/custom-mlp \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"type":"mlp","version":"v3","input_dim":3,"output_dim":2,"hidden":64,"seed":7}'
+
+# remove it
+curl -X DELETE localhost:8080/v1/admin/models/custom-mlp \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+`ModelSpec` fields: `type` (`mlp` | `linear` | `echo` | `storygen`),
+`version` (default `v1`), `input_dim` / `output_dim` (mlp, linear),
+`hidden` (mlp, default 16), `seed` (deterministic weights),
+`num_tokens` / `token_delay_ms` (storygen). Set `ADMIN_TOKEN` (or
+`--admin-token`) to protect the admin routes with a bearer token; leave it
+empty only for local development — the server warns on startup.
 
 ## Architecture
 
@@ -99,7 +131,14 @@ Under load the 32-row batch fills instantly, so p50 stays far below the
 --max-per-request 256        max rows in one predict request
 --max-inflight 200           concurrent requests before 429
 --request-timeout 30s        per-request deadline
+--admin-token <token>        bearer token for /v1/admin/* (or ADMIN_TOKEN env)
 ```
+
+Or run it in Docker:
+
+```bash
+docker build -t inference-server .
+docker run -p 8080:8080 -e ADMIN_TOKEN=secret inference-server
 
 ## Project layout
 
@@ -110,7 +149,8 @@ Under load the 32-row batch fills instantly, so p50 stays far below the
 - `internal/batcher` — dynamic request batching
 - `internal/models` — model interface + built-in models
 - `internal/metrics` — Prometheus-style metrics
-- `examples/` — sample requests
+- `examples/` — sample requests (`predict.sh`, `admin.sh`)
+- `Dockerfile` — multi-stage build for a minimal container image
 
 ## Roadmap
 
@@ -122,7 +162,7 @@ Under load the 32-row batch fills instantly, so p50 stays far below the
 - [x] Concurrency limits, graceful shutdown, request timeouts
 - [x] Metrics: latency histograms, throughput, queue depth (`/metrics`)
 - [x] Load-test harness + benchmark numbers in README
-- [ ] Admin API for registering custom models at runtime
+- [x] Admin API for registering custom models at runtime (register/hot-swap/delete, bearer token)
 - [ ] Persistent model artifacts (ONNX weights via onnxruntime-go)
 - [ ] Distributed tracing hooks
 
