@@ -28,6 +28,7 @@ func main() {
 		maxPerRequest   = flag.Int("max-per-request", 256, "max rows in one predict request")
 		maxInflight     = flag.Int("max-inflight", 200, "max concurrent predict/stream requests")
 		requestTimeout  = flag.Duration("request-timeout", 30*time.Second, "per-request timeout")
+		adminToken      = flag.String("admin-token", os.Getenv("ADMIN_TOKEN"), "bearer token for /v1/admin/* (empty = open, dev only)")
 	)
 	flag.Parse()
 
@@ -44,6 +45,7 @@ func main() {
 		MaxPerRequest:   *maxPerRequest,
 		MaxInflight:     *maxInflight,
 		RequestTimeout:  *requestTimeout,
+		AdminToken:      *adminToken,
 	})
 
 	httpServer := &http.Server{
@@ -67,6 +69,9 @@ func main() {
 	}()
 
 	fmt.Printf("realtime-inference-server listening on %s (%d models)\n", *addr, reg.Len())
+	if *adminToken == "" {
+		log.Println("warning: admin API is unprotected (set ADMIN_TOKEN or --admin-token in production)")
+	}
 	for _, e := range reg.List() {
 		fmt.Printf("  - %-12s %-4s in=%d out=%d streaming=%v\n",
 			e.ID, e.Version, e.InputDim, e.OutputDim, e.Streaming)
