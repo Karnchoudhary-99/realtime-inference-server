@@ -32,7 +32,10 @@ type result struct {
 
 // Batcher merges Submit calls into batched Predict invocations.
 type Batcher struct {
-	model models.Model
+	// muModel guards model so the implementation can be hot-swapped
+	// while the batching loop is running.
+	muModel sync.RWMutex
+	model   models.Model
 
 	maxBatchSize  int
 	maxLatency    time.Duration
@@ -77,7 +80,7 @@ func New(model models.Model, maxBatchSize int, maxLatency time.Duration, maxPerR
 // until its results are ready or ctx is cancelled. Input slices are not
 // retained after Submit returns.
 func (b *Batcher) Submit(ctx context.Context, inputs [][]float64) ([][]float64, error) {
-	if err := models.CheckBatchSize(b.model.Name(), len(inputs), b.maxPerRequest); err != nil {
+	if err := models.CheckBatchSize(b.currentModel().Name(), len(inputs), b.maxPerRequest); err != nil {
 		return nil, err
 	}
 	req := &request{ctx: ctx, inputs: inputs, result: make(chan result, 1)}
@@ -97,6 +100,22 @@ func (b *Batcher) Submit(ctx context.Context, inputs [][]float64) ([][]float64, 
 	case res := <-req.result:
 		return res.outputs, res.err
 	}
+}
+
+// SwapModel atomically replaces the implementation used for future batches.
+// Requests already dispatched to the old model finish on it; batches formed
+// after the swap use the new one.
+func (b *Batcher) SwapModel(m models.Model) {
+	b.muModel.Lock()
+	defer b.muModel.Unlock()
+	b.model = m
+}
+
+// currentModel returns the implementation new batches will run.
+func (b *Batcher) currentModel() models.Model {
+	b.muModel.RLock()
+	defer b.muModel.RUnlock()
+	return b.model
 }
 
 // Stats returns lifetime counters.
@@ -233,7 +252,7 @@ func (b *Batcher) dispatch() {
 	// The batch runs with a background context: per-request deadlines were
 	// already enforced by the waiters, and we must not let one cancelled
 	// waiter abort the whole batch.
-	outputs, err := b.model.Predict(context.Background(), flat)
+	outputs, err := b.currentModel().Predict(context.Background(), flat)
 	for _, sp := range spans {
 		if sp.req.done.Load() {
 			continue

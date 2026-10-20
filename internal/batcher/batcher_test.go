@@ -144,3 +144,35 @@ func TestQueueDepthCallback(t *testing.T) {
 		t.Fatalf("depth callback never saw both states: %v", depths)
 	}
 }
+
+func TestSwapModel(t *testing.T) {
+	echo := &countingModel{Model: models.NewEchoModel("echo", "v1")}
+	b := New(echo, 64, 5*time.Millisecond, 256, nil)
+	defer b.Stop()
+
+	out, err := b.Submit(context.Background(), [][]float64{{1.0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[0][0] != 1.0 {
+		t.Fatalf("echo output = %v", out)
+	}
+
+	// Swap to an MLP: batches after the swap run on the new model, and
+	// the batcher's per-request limit checks use the new model's name/dims.
+	mlp := models.NewMLPClassifier("mlp", "v2", 2, 4, 2, 3)
+	b.SwapModel(mlp)
+
+	out, err = b.Submit(context.Background(), [][]float64{{1.0, 2.0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || len(out[0]) != 2 {
+		t.Fatalf("mlp output = %v", out)
+	}
+	// Wrong width for the NEW model surfaces as a batch error (the old
+	// echo model would have accepted any width).
+	if _, err := b.Submit(context.Background(), [][]float64{{1.0, 2.0, 3.0}}); err == nil {
+		t.Fatal("expected dim-mismatch error after swap, got nil")
+	}
+}
